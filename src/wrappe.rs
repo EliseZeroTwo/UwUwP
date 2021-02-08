@@ -5,7 +5,9 @@ use std::{
     string::FromUtf16Error,
 };
 
-use crate::bindings::windows::{win32::*, ErrorCode};
+use windows::BOOL;
+
+use crate::{bindings::windows::{win32::*, ErrorCode}};
 
 pub fn get_acl(
     path: String,
@@ -279,4 +281,59 @@ pub fn launch_uwp_app(pkg_full_name: &String) -> Result<u32, ErrorCode> {
         }
     }
     Ok(pid_out)
+}
+
+// Adapted from https://github.com/darfink/detour-rs/blob/master/examples/messageboxw_detour.rs#L47
+pub fn get_module_symbol_address(module: &str, symbol: &str) -> Option<usize> {
+    let module = string_to_wchar_vec(&module.to_string()); 
+    let symbol = CString::new(symbol).unwrap();
+    unsafe {
+        let handle = system_services::GetModuleHandleW(module.as_ptr());
+        match system_services::GetProcAddress(handle, symbol.as_ptr()) {
+            Some(n) => Some(n as usize),
+            None => None,
+        }
+    }
+}
+
+pub fn do_dll_injection(pid: u32, dlls: Vec<String>) -> Result<(), String> {
+    let load_library_addr = get_module_symbol_address("kernel32.dll", "LoadLibraryA").expect("Failed to find LoadLibraryA in kernel32.dll");
+    unsafe {
+        let proc_handle = system_services::OpenProcess(0x1F0FFF, BOOL::from(false), pid);
+        if proc_handle.0 == 0 {
+            return Err("Process Handle is NULL".to_string());
+        }
+        
+        let remote_proc_mem_addr = system_services::VirtualAllocEx(proc_handle, null_mut(), 260 , 0x2000 | 0x1000, 0x40);
+        if remote_proc_mem_addr.is_null() {
+            windows_programming::CloseHandle(proc_handle);
+            return Err("Memory Allocation in Remote Process Failed".to_string());
+        }
+        for dll in dlls {
+            println!("Injecting {}", &dll);
+            crate::set_dll_perms(dll.clone());
+
+            let cstr = CString::new(dll.clone()).expect("Failed to turn DLL path into CString").into_raw();
+            let res = debug::WriteProcessMemory(proc_handle, remote_proc_mem_addr, cstr as *mut _, dll.len(), null_mut());
+            let _ = CString::from_raw(cstr);
+            if res.as_bool() == false {
+                system_services::VirtualFreeEx(proc_handle, remote_proc_mem_addr, 0, 0x8000);
+                windows_programming::CloseHandle(proc_handle);
+                return Err("Failed to Write Remote Process Memory".to_string());
+            }
+    
+            let load_library_addr = std::mem::transmute(load_library_addr);
+            let thread = system_services::CreateRemoteThread(proc_handle, null_mut(), 0, Some(load_library_addr), remote_proc_mem_addr, 0, null_mut());
+            std::thread::sleep(std::time::Duration::from_millis(50)); // Race Condition
+            system_services::VirtualFreeEx(proc_handle, remote_proc_mem_addr, 0, 0x8000);
+            
+            if thread.0 == 0 {
+                windows_programming::CloseHandle(proc_handle);
+                return Err("Failed to Create Thread in Remote Process".to_string());
+            } 
+            windows_programming::CloseHandle(thread);
+        }
+        windows_programming::CloseHandle(proc_handle);
+    }
+    Ok(())
 }

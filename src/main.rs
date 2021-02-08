@@ -3,6 +3,7 @@ mod bindings {
     ::windows::include_bindings!();
 }
 
+extern crate argh;
 #[macro_use]
 extern crate lazy_static;
 
@@ -23,15 +24,17 @@ lazy_static! {
     );
 }
 
+mod detou;
 mod wrappe;
 
+use argh::FromArgs;
+use detou::apply_static_detours;
 use std::env;
-use wrappe::{
-    app_id_vec_from_pkg_full_name, launch_uwp_app, pkg_family_name_to_package_full_names,
-    set_acl_from_string_sid,
-};
+use wrappe::{app_id_vec_from_pkg_full_name, do_dll_injection, launch_uwp_app, pkg_family_name_to_package_full_names, set_acl_from_string_sid};
 
-fn set_dll_perms(path: String) {
+
+
+pub fn set_dll_perms(path: String) {
     set_acl_from_string_sid(path.clone(), "S-1-15-2-1".to_string())
         .expect(format!("Unable to set permissions for {}", path).as_str());
 }
@@ -54,13 +57,46 @@ fn launch_app_from_family_name(family_name: &String) -> Result<u32, String> {
     launch_uwp_app(app_id).map_err(|err| format!("Failed to launch UWP app, Got {:?}", err))
 }
 
-fn main() {
-    windows::initialize_mta().expect("Unable to initialize MTA");
-    let mut args = env::args();
-    let proc_name = args.next().unwrap();
-    let family_name = args
-        .next()
-        .expect(format!("{} <APP_FAMILY_NAME>", proc_name).as_str());
+#[derive(FromArgs)]
+/// Mod Loader
+struct UwUwPArgs {
+    #[argh(option, short='d')]
+    /// directory of DLLs to inject in alphabetical order
+    dll_dir: Option<String>,
 
-    launch_app_from_family_name(&family_name).expect("Failed to launch app");
+    #[argh(positional)]
+    /// app family name
+    family_name: String,
+}
+
+fn main() {
+    let args: UwUwPArgs = argh::from_env();
+    let dlls = if let Some(dll_dir) = &args.dll_dir {
+        match std::fs::read_dir(dll_dir) {
+            Ok(paths) => Some(paths.filter_map(|x| {
+                if let Ok(dirent) = x {
+                    let path = std::fs::canonicalize(dirent.path()).unwrap().to_str().unwrap().to_string();
+                    if path.to_lowercase().ends_with(".dll") {
+                        return Some(path)
+                    } 
+                }
+                None
+            }).collect::<Vec<String>>()),
+            Err(_) => {
+                println!("{} is not a valid directory", dll_dir);
+                std::process::exit(-1);
+            },
+        }
+    } else {
+        None
+    };
+
+    windows::initialize_mta().expect("Unable to initialize MTA");
+    
+    apply_static_detours();
+    
+    let pid = launch_app_from_family_name(&args.family_name).expect("Failed to launch app");
+    if let Some(dll_list) = dlls {
+        do_dll_injection(pid, dll_list).expect("Unable to DLL inject");
+    }
 }
