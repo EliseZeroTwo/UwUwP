@@ -1,0 +1,16 @@
+[package]
+name = "uwuwp"
+version = "0.1.0"
+authors = ["EliseZeroTwo <elise@headpat.services>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+detour = "0.7.1"
+lazy_static = "1.4.0"
+# winapi = { version = "0.3", features = ["accctrl", "aclapi", "sddl", "shobjidl_core", "winbase", "winnt"] }
+windows = "0.3.1"
+
+[build-dependencies]
+windows = "0.3.1"
